@@ -231,7 +231,7 @@
 
   <script>
     // URL Google Apps Script xử lý đăng nhập & bảo mật
-    const AUTH_API_URL = "https://script.google.com/macros/s/AKfycbzhvLo7ouJV8hGlQmsWKRdUi8QhhHejmKGBJ6ZGCBAZHoOIvCjU_oZ7RLGglJtP3Q9_/exec";
+    const AUTH_API_URL = "https://script.google.com/macros/s/AKfycbxP8Ko1PKLL7UVoKGcDvYwmvawqA6da_ajqxMWkc53nVfKiuqJKycXWMAot19RxKje54A/exec";
     
     // Script sao lưu dữ liệu cũ
     const BACKUP_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyMkD7y_bCC4l27JZgn5bzmWpch_ZTH208YzapDTw6nMIC4CXD9lUJJ2ccq3wqcsmhLeA/exec";
@@ -242,6 +242,11 @@
     let CURRENT_MTB = localStorage.getItem('cur_mtb') || null;
     let BOT_TOKEN = localStorage.getItem('cur_token') || null;
     let CHAT_ID = localStorage.getItem('cur_chatid') || null;
+    
+    // BOT DỰ PHÒNG (BOT 2)
+    let BACKUP_BOT_TOKEN = localStorage.getItem('cur_backup_token') || null;
+    let BACKUP_CHAT_ID = localStorage.getItem('cur_backup_chatid') || null;
+
     let MAX_STORAGE_GB = parseFloat(localStorage.getItem('cur_max_gb')) || 100;
 
     let dbFiles = [];
@@ -287,11 +292,20 @@
           CURRENT_MTB = mtb;
           BOT_TOKEN = resData.token;
           CHAT_ID = resData.chatId;
+          
+          // Lấy thông tin Bot 2 dự phòng từ kết quả trả về
+          BACKUP_BOT_TOKEN = resData.backupToken || null;
+          BACKUP_CHAT_ID = resData.backupChatId || null;
+
           MAX_STORAGE_GB = resData.maxGb || 100;
 
           localStorage.setItem('cur_mtb', CURRENT_MTB);
           localStorage.setItem('cur_token', BOT_TOKEN);
           localStorage.setItem('cur_chatid', CHAT_ID);
+          
+          if (BACKUP_BOT_TOKEN) localStorage.setItem('cur_backup_token', BACKUP_BOT_TOKEN);
+          if (BACKUP_CHAT_ID) localStorage.setItem('cur_backup_chatid', BACKUP_CHAT_ID);
+
           localStorage.setItem('cur_max_gb', MAX_STORAGE_GB);
 
           statusDiv.className = "text-xs text-center font-medium text-emerald-400";
@@ -354,26 +368,44 @@
     async function autoSaveMainDatabase() {
       if (!BOT_TOKEN || !CHAT_ID) return;
 
+      const activeToken = BOT_TOKEN;
+      const activeChatId = CHAT_ID;
+
       try {
         const jsonString = JSON.stringify(dbFiles);
         const blob = new Blob([jsonString], { type: "application/json" });
         
         const formData = new FormData();
-        formData.append('chat_id', CHAT_ID);
+        formData.append('chat_id', activeChatId);
         formData.append('document', blob, `database_${CURRENT_MTB}.json`);
 
-        const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendDocument`, {
+        let res = await fetch(`https://api.telegram.org/bot${activeToken}/sendDocument`, {
           method: 'POST',
           body: formData
         });
 
+        // Nếu Bot chính bị lỗi, tự chuyển sang gửi qua Bot 2 dự phòng
+        if (!res.ok && BACKUP_BOT_TOKEN && BACKUP_CHAT_ID) {
+          const formDataBackup = new FormData();
+          formDataBackup.append('chat_id', BACKUP_CHAT_ID);
+          formDataBackup.append('document', blob, `database_${CURRENT_MTB}.json`);
+
+          res = await fetch(`https://api.telegram.org/bot${BACKUP_BOT_TOKEN}/sendDocument`, {
+            method: 'POST',
+            body: formDataBackup
+          });
+        }
+
         const data = await res.json();
         if (data.ok && data.result.message_id) {
-          await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/pinChatMessage`, {
+          const usedToken = res.url.includes(BACKUP_BOT_TOKEN) ? BACKUP_BOT_TOKEN : activeToken;
+          const usedChatId = res.url.includes(BACKUP_BOT_TOKEN) ? BACKUP_CHAT_ID : activeChatId;
+
+          await fetch(`https://api.telegram.org/bot${usedToken}/pinChatMessage`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              chat_id: CHAT_ID,
+              chat_id: usedChatId,
               message_id: data.result.message_id,
               disable_notification: true
             })
@@ -486,11 +518,22 @@
 
         statusText.innerText = `📦 ${file.name} (Mảnh ${chunkIndex + 1}/${totalChunks})`;
 
-        const fileId = await uploadSingleChunkXHR(chunkBlob, chunkFileName, (percent) => {
+        // Thử đẩy qua Bot chính trước
+        let fileId = await uploadSingleChunkXHR(chunkBlob, chunkFileName, BOT_TOKEN, CHAT_ID, (percent) => {
           const overallPercent = Math.round(((start + (chunkBlob.size * (percent / 100))) / file.size) * 100);
           progressBar.style.width = overallPercent + '%';
           percentText.innerText = overallPercent + '%';
         });
+
+        // Nếu Bot chính bị lỗi, tự động chuyển sang Bot 2 dự phòng
+        if (!fileId && BACKUP_BOT_TOKEN && BACKUP_CHAT_ID) {
+          statusText.innerText = `🔄 [Bot Dự Phòng] ${file.name} (Mảnh ${chunkIndex + 1}/${totalChunks})`;
+          fileId = await uploadSingleChunkXHR(chunkBlob, chunkFileName, BACKUP_BOT_TOKEN, BACKUP_CHAT_ID, (percent) => {
+            const overallPercent = Math.round(((start + (chunkBlob.size * (percent / 100))) / file.size) * 100);
+            progressBar.style.width = overallPercent + '%';
+            percentText.innerText = overallPercent + '%';
+          });
+        }
 
         if (fileId) {
           chunkFileIds.push(fileId);
@@ -511,14 +554,14 @@
       };
     }
 
-    function uploadSingleChunkXHR(blob, fileName, onProgress) {
+    function uploadSingleChunkXHR(blob, fileName, token, chatId, onProgress) {
       return new Promise((resolve) => {
         const formData = new FormData();
-        formData.append('chat_id', CHAT_ID);
+        formData.append('chat_id', chatId);
         formData.append('document', blob, fileName);
 
         currentXHR = new XMLHttpRequest();
-        currentXHR.open('POST', `https://api.telegram.org/bot${BOT_TOKEN}/sendDocument`, true);
+        currentXHR.open('POST', `https://api.telegram.org/bot${token}/sendDocument`, true);
 
         currentXHR.upload.onprogress = (e) => {
           if (e.lengthComputable) {
@@ -529,10 +572,12 @@
 
         currentXHR.onload = function() {
           if (currentXHR.status === 200) {
-            const data = JSON.parse(currentXHR.responseText);
-            if (data.ok && data.result.document) {
-              resolve(data.result.document.file_id);
-            } else resolve(null);
+            try {
+              const data = JSON.parse(currentXHR.responseText);
+              if (data.ok && data.result.document) {
+                resolve(data.result.document.file_id);
+              } else resolve(null);
+            } catch(e) { resolve(null); }
           } else resolve(null);
         };
 
@@ -567,6 +612,7 @@
     }
 
     async function getDirectFileUrl(fileId) {
+      // Thử lấy file bằng Bot chính
       try {
         const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${fileId}`);
         const data = await res.json();
@@ -574,6 +620,18 @@
           return `https://api.telegram.org/file/bot${BOT_TOKEN}/${data.result.file_path}`;
         }
       } catch (e) {}
+
+      // Nếu Bot chính thất bại, dùng Bot 2 dự phòng
+      if (BACKUP_BOT_TOKEN) {
+        try {
+          const resBackup = await fetch(`https://api.telegram.org/bot${BACKUP_BOT_TOKEN}/getFile?file_id=${fileId}`);
+          const dataBackup = await resBackup.json();
+          if (dataBackup.ok && dataBackup.result.file_path) {
+            return `https://api.telegram.org/file/bot${BACKUP_BOT_TOKEN}/${dataBackup.result.file_path}`;
+          }
+        } catch (e) {}
+      }
+
       return null;
     }
 
