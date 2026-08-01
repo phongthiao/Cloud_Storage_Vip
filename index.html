@@ -230,9 +230,10 @@
   </div>
 
   <script>
-    // Link Google Sheets CSV công khai của bạn
-    const DATA_CLOUD_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vS7iLGeDWa7Yarmlwyt51YQkyvTAFQYO591BxiFnGR_QFCAqIP-OSUH_mzEZcZZOQ_9EJX-5sXKjOCd/pub?output=csv";
+    // URL Google Apps Script xử lý đăng nhập & bảo mật
+    const AUTH_API_URL = "https://script.google.com/macros/s/AKfycbzhvLo7ouJV8hGlQmsWKRdUi8QhhHejmKGBJ6ZGCBAZHoOIvCjU_oZ7RLGglJtP3Q9_/exec";
     
+    // Script sao lưu dữ liệu cũ
     const BACKUP_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyMkD7y_bCC4l27JZgn5bzmWpch_ZTH208YzapDTw6nMIC4CXD9lUJJ2ccq3wqcsmhLeA/exec";
 
     // Kích thước cắt file mặc định (15 MB mỗi chunk)
@@ -259,32 +260,7 @@
       }
     };
 
-    // Hàm Parser CSV chuẩn hóa xử lý ngoặc kép và dấu phẩy chính xác
-    function parseCSV(text) {
-      const lines = text.split(/\r\n|\n/);
-      const result = [];
-      for (let i = 0; i < lines.length; i++) {
-        if (!lines[i].trim()) continue;
-        const row = [];
-        let insideQuote = false;
-        let entry = '';
-        for (let j = 0; j < lines[i].length; j++) {
-          const char = lines[i][j];
-          if (char === '"') {
-            insideQuote = !insideQuote;
-          } else if (char === ',' && !insideQuote) {
-            row.push(entry.trim());
-            entry = '';
-          } else {
-            entry += char;
-          }
-        }
-        row.push(entry.trim());
-        result.push(row);
-      }
-      return result;
-    }
-
+    // Hàm đăng nhập bảo mật gửi request POST tới Apps Script
     async function loginWithCloud() {
       const mtb = document.getElementById('inputMTB').value.trim().toUpperCase();
       const mk = document.getElementById('inputMK').value.trim();
@@ -299,32 +275,19 @@
       loginBtn.disabled = true;
 
       try {
-        const response = await fetch(DATA_CLOUD_URL + '&t=' + Date.now());
-        const csvText = await response.text();
-        const rows = parseCSV(csvText);
+        const response = await fetch(AUTH_API_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: JSON.stringify({ mtb: mtb, mk: mk })
+        });
+        
+        const resData = await response.json();
 
-        let userFound = null;
-        for (let i = 1; i < rows.length; i++) {
-          const row = rows[i];
-          if (row.length >= 2) {
-            const csvMTB = row[0].replace(/^"/, '').replace(/"$/, '').trim().toUpperCase();
-            const csvMK = row[1].replace(/^"/, '').replace(/"$/, '').trim();
-
-            if (csvMTB === mtb && csvMK === mk) {
-              const token = row[2] ? row[2].replace(/^"/, '').replace(/"$/, '').trim() : '';
-              const chatId = row[3] ? row[3].replace(/^"/, '').replace(/"$/, '').trim() : '';
-              const maxGb = (row[4] && !isNaN(parseFloat(row[4]))) ? parseFloat(row[4].trim()) : 100;
-              userFound = { token: token, chatId: chatId, maxGb: maxGb };
-              break;
-            }
-          }
-        }
-
-        if (userFound) {
+        if (resData.success) {
           CURRENT_MTB = mtb;
-          BOT_TOKEN = userFound.token;
-          CHAT_ID = userFound.chatId;
-          MAX_STORAGE_GB = userFound.maxGb;
+          BOT_TOKEN = resData.token;
+          CHAT_ID = resData.chatId;
+          MAX_STORAGE_GB = resData.maxGb || 100;
 
           localStorage.setItem('cur_mtb', CURRENT_MTB);
           localStorage.setItem('cur_token', BOT_TOKEN);
@@ -343,7 +306,7 @@
 
         } else {
           statusDiv.className = "text-xs text-center font-medium text-rose-400";
-          statusDiv.innerText = "❌ Sai Mã thiết bị hoặc Mật khẩu!";
+          statusDiv.innerText = "❌ " + (resData.message || "Sai Mã thiết bị hoặc Mật khẩu!");
         }
       } catch (err) {
         console.error("Lỗi xác thực:", err);
