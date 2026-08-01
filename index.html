@@ -239,12 +239,17 @@
     // Kích thước cắt file mặc định (15 MB mỗi chunk)
     const CHUNK_SIZE = 15 * 1024 * 1024; 
 
-    let CURRENT_MTB = localStorage.getItem('cur_mtb') || null;
-    let BOT_TOKEN = localStorage.getItem('cur_token') || null;
-    let CHAT_ID = localStorage.getItem('cur_chatid') || null;
-    let MAX_STORAGE_GB = parseFloat(localStorage.getItem('cur_max_gb')) || 100;
+    // Đối tượng cấu hình dùng chung cho hàm sao lưu
+    let currentConfig = {
+      mtb: localStorage.getItem('cur_mtb') || null,
+      token: localStorage.getItem('cur_token') || null,
+      chatId: localStorage.getItem('cur_chatid') || null,
+      backupBotToken: localStorage.getItem('cur_backup_token') || null,
+      backupChatId: localStorage.getItem('cur_backup_chatid') || null
+    };
 
-    let dbFiles = [];
+    let MAX_STORAGE_GB = parseFloat(localStorage.getItem('cur_max_gb')) || 100;
+    let dbData = [];
     let currentFolderId = null;
 
     let isUploading = false;
@@ -253,9 +258,9 @@
     let currentXHR = null;
 
     window.onload = async () => {
-      if (CURRENT_MTB && BOT_TOKEN && CHAT_ID) {
+      if (currentConfig.mtb && currentConfig.token && currentConfig.chatId) {
         document.getElementById('loginScreen').classList.add('hidden');
-        document.getElementById('userInfoBadge').innerText = `Thiết bị: ${CURRENT_MTB}`;
+        document.getElementById('userInfoBadge').innerText = `Thiết bị: ${currentConfig.mtb}`;
         await autoFetchLatestBackupOnStart();
       }
     };
@@ -284,14 +289,18 @@
         const resData = await response.json();
 
         if (resData.success) {
-          CURRENT_MTB = mtb;
-          BOT_TOKEN = resData.token;
-          CHAT_ID = resData.chatId;
+          currentConfig.mtb = mtb;
+          currentConfig.token = resData.token;
+          currentConfig.chatId = resData.chatId;
+          currentConfig.backupBotToken = resData.backupBotToken || null;
+          currentConfig.backupChatId = resData.backupChatId || null;
           MAX_STORAGE_GB = resData.maxGb || 100;
 
-          localStorage.setItem('cur_mtb', CURRENT_MTB);
-          localStorage.setItem('cur_token', BOT_TOKEN);
-          localStorage.setItem('cur_chatid', CHAT_ID);
+          localStorage.setItem('cur_mtb', currentConfig.mtb);
+          localStorage.setItem('cur_token', currentConfig.token);
+          localStorage.setItem('cur_chatid', currentConfig.chatId);
+          if (resData.backupBotToken) localStorage.setItem('cur_backup_token', resData.backupBotToken);
+          if (resData.backupChatId) localStorage.setItem('cur_backup_chatid', resData.backupChatId);
           localStorage.setItem('cur_max_gb', MAX_STORAGE_GB);
 
           statusDiv.className = "text-xs text-center font-medium text-emerald-400";
@@ -299,7 +308,7 @@
 
           setTimeout(async () => {
             document.getElementById('loginScreen').classList.add('hidden');
-            document.getElementById('userInfoBadge').innerText = `Thiết bị: ${CURRENT_MTB}`;
+            document.getElementById('userInfoBadge').innerText = `Thiết bị: ${currentConfig.mtb}`;
             document.getElementById('warningModal').classList.remove('hidden');
             await autoFetchLatestBackupOnStart();
           }, 500);
@@ -322,9 +331,9 @@
     }
 
     async function autoFetchLatestBackupOnStart() {
-      if (!CURRENT_MTB) return;
+      if (!currentConfig.mtb) return;
       try {
-        const res = await fetch(`${BACKUP_SCRIPT_URL}?mtb=${encodeURIComponent(CURRENT_MTB)}&t=${Date.now()}`);
+        const res = await fetch(`${BACKUP_SCRIPT_URL}?mtb=${encodeURIComponent(currentConfig.mtb)}&t=${Date.now()}`);
         const listData = await res.json();
 
         if (listData && listData.length > 0) {
@@ -332,10 +341,10 @@
           const fullJsonData = (latestItem.mainData || "") + (latestItem.subData || "") || latestItem.backupData;
           
           if (fullJsonData) {
-            dbFiles = typeof fullJsonData === 'string' ? JSON.parse(fullJsonData) : fullJsonData;
+            dbData = typeof fullJsonData === 'string' ? JSON.parse(fullJsonData) : fullJsonData;
           }
         } else {
-          dbFiles = [];
+          dbData = [];
         }
       } catch (e) {
         console.error("Lỗi đọc dữ liệu cá nhân:", e);
@@ -351,39 +360,62 @@
       await autoExportBackupToCloud();
     }
 
+    // HÀM SAO LƯU ĐỒNG THỜI VỀ 2 BOT TELEGRAM (ĐÃ ĐƯỢC CẬP NHẬT TRÍ TỆ VÀO HỆ THỐNG)
     async function autoSaveMainDatabase() {
-      if (!BOT_TOKEN || !CHAT_ID) return;
-
       try {
-        const jsonString = JSON.stringify(dbFiles);
-        const blob = new Blob([jsonString], { type: "application/json" });
+        if (!currentConfig || !dbData) return;
+
+        // Tên file backup
+        const fileName = `database_${currentConfig.mtb || 'backup'}.json`;
+        const jsonString = JSON.stringify(dbData, null, 2);
         
-        const formData = new FormData();
-        formData.append('chat_id', CHAT_ID);
-        formData.append('document', blob, `database_${CURRENT_MTB}.json`);
+        // Tạo File Blob
+        const blob = new Blob([jsonString], { type: 'application/json' });
 
-        const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendDocument`, {
-          method: 'POST',
-          body: formData
-        });
+        // 1. Chuẩn bị FormData cho BOT CHÍNH
+        const formDataMain = new FormData();
+        formDataMain.append('chat_id', currentConfig.chatId);
+        formDataMain.append('document', blob, fileName);
+        formDataMain.append('caption', `📦 [TỰ ĐỘNG SAO LƯU - BOT CHÍNH]\n⏰ Thời gian: ${new Date().toLocaleString('vi-VN')}`);
 
-        const data = await res.json();
-        if (data.ok && data.result.message_id) {
-          await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/pinChatMessage`, {
+        // 2. Chuẩn bị FormData cho BOT DỰ PHÒNG
+        const formDataBackup = new FormData();
+        const backupChatId = currentConfig.backupChatId || currentConfig.chatId;
+        const backupToken = currentConfig.backupBotToken || currentConfig.token;
+        
+        formDataBackup.append('chat_id', backupChatId);
+        formDataBackup.append('document', blob, fileName);
+        formDataBackup.append('caption', `🛡️ [TỰ ĐỘNG SAO LƯU - BOT DỰ PHÒNG]\n⏰ Thời gian: ${new Date().toLocaleString('vi-VN')}`);
+
+        // 3. Gửi đồng thời về cả 2 BOT cùng lúc (Promise.all)
+        const requests = [
+          fetch(`https://api.telegram.org/bot${currentConfig.token}/sendDocument`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              chat_id: CHAT_ID,
-              message_id: data.result.message_id,
-              disable_notification: true
+            body: formDataMain
+          })
+        ];
+
+        // Nếu có cấu hình Bot dự phòng thì gửi thêm
+        if (currentConfig.backupBotToken && currentConfig.backupChatId) {
+          requests.push(
+            fetch(`https://api.telegram.org/bot${backupToken}/sendDocument`, {
+              method: 'POST',
+              body: formDataBackup
             })
-          });
+          );
         }
-      } catch (e) {}
+
+        // Chờ cả 2 bot gửi xong
+        const responses = await Promise.all(requests);
+        console.log('✅ Đã sao lưu thành công về cả 2 Bot!');
+
+      } catch (error) {
+        console.error('❌ Lỗi khi tự động sao lưu 2 bot:', error);
+      }
     }
 
     async function autoExportBackupToCloud() {
-      if (!CURRENT_MTB) return;
+      if (!currentConfig.mtb) return;
       const currentTimeStr = new Date().toLocaleString('vi-VN');
 
       try {
@@ -392,9 +424,9 @@
           mode: 'no-cors',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            mtb: CURRENT_MTB,
+            mtb: currentConfig.mtb,
             time: currentTimeStr,
-            backupData: JSON.stringify(dbFiles),
+            backupData: JSON.stringify(dbData),
             overwrite: false
           })
         });
@@ -411,7 +443,7 @@
       if (files.length === 0) return alert("Vui lòng chọn tệp cần tải lên!");
 
       const totalNewBytes = files.reduce((sum, f) => sum + f.size, 0);
-      const currentUsedBytes = dbFiles.reduce((sum, item) => sum + (item.size || 0), 0);
+      const currentUsedBytes = dbData.reduce((sum, item) => sum + (item.size || 0), 0);
       const maxAllowedBytes = MAX_STORAGE_GB * 1024 * 1024 * 1024;
 
       if (currentUsedBytes + totalNewBytes > maxAllowedBytes) {
@@ -444,7 +476,7 @@
         
         const uploadedItem = await uploadChunkedFile(file, statusText, progressBar, percentText);
         if (uploadedItem) {
-          dbFiles.unshift(uploadedItem);
+          dbData.unshift(uploadedItem);
           renderFiles(getCurrentFolderItems());
           updateStorageUsage();
           successCount++;
@@ -514,11 +546,11 @@
     function uploadSingleChunkXHR(blob, fileName, onProgress) {
       return new Promise((resolve) => {
         const formData = new FormData();
-        formData.append('chat_id', CHAT_ID);
+        formData.append('chat_id', currentConfig.chatId);
         formData.append('document', blob, fileName);
 
         currentXHR = new XMLHttpRequest();
-        currentXHR.open('POST', `https://api.telegram.org/bot${BOT_TOKEN}/sendDocument`, true);
+        currentXHR.open('POST', `https://api.telegram.org/bot${currentConfig.token}/sendDocument`, true);
 
         currentXHR.upload.onprogress = (e) => {
           if (e.lengthComputable) {
@@ -568,17 +600,17 @@
 
     async function getDirectFileUrl(fileId) {
       try {
-        const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${fileId}`);
+        const res = await fetch(`https://api.telegram.org/bot${currentConfig.token}/getFile?file_id=${fileId}`);
         const data = await res.json();
         if (data.ok && data.result.file_path) {
-          return `https://api.telegram.org/file/bot${BOT_TOKEN}/${data.result.file_path}`;
+          return `https://api.telegram.org/file/bot${currentConfig.token}/${data.result.file_path}`;
         }
       } catch (e) {}
       return null;
     }
 
     async function downloadFileById(itemId) {
-      const item = dbFiles.find(f => f.id === itemId);
+      const item = dbData.find(f => f.id === itemId);
       if (!item) return alert("❌ Không tìm thấy thông tin tệp!");
 
       const progressModal = document.getElementById('progressModal');
@@ -614,7 +646,7 @@
     }
 
     async function previewFile(itemId) {
-      const item = dbFiles.find(f => f.id === itemId);
+      const item = dbData.find(f => f.id === itemId);
       if (!item) return;
 
       const modal = document.getElementById('previewModal');
@@ -666,7 +698,7 @@
       const checkedBoxes = Array.from(document.querySelectorAll('.item-checkbox:checked'));
       if (checkedBoxes.length === 0) return;
 
-      const items = checkedBoxes.map(cb => dbFiles.find(f => f.id === cb.value)).filter(f => f && !f.isFolder);
+      const items = checkedBoxes.map(cb => dbData.find(f => f.id === cb.value)).filter(f => f && !f.isFolder);
 
       if (items.length === 0) return alert("⚠️ Vui lòng chọn tệp lẻ để tải xuống!");
 
@@ -719,7 +751,7 @@
 
       for (let i = 0; i < checkedBoxes.length; i++) {
         const id = checkedBoxes[i].value;
-        dbFiles = dbFiles.filter(f => f.id !== id);
+        dbData = dbData.filter(f => f.id !== id);
       }
 
       renderFiles(getCurrentFolderItems());
@@ -733,10 +765,10 @@
     }
 
     async function deleteSingleItem(id) {
-      const item = dbFiles.find(f => f.id === id);
+      const item = dbData.find(f => f.id === id);
       if (!item || !confirm(`Xóa vĩnh viễn "${item.name}"?`)) return;
 
-      dbFiles = dbFiles.filter(f => f.id !== id);
+      dbData = dbData.filter(f => f.id !== id);
       renderFiles(getCurrentFolderItems());
       updateStorageUsage();
 
@@ -747,7 +779,7 @@
       const folderName = prompt("Nhập tên thư mục mới:");
       if (!folderName || !folderName.trim()) return;
 
-      dbFiles.unshift({
+      dbData.unshift({
         id: "folder_" + Date.now(),
         name: folderName.trim(),
         isFolder: true,
@@ -760,7 +792,7 @@
     }
 
     function getCurrentFolderItems() {
-      return dbFiles.filter(item => (item.parentId || null) === currentFolderId);
+      return dbData.filter(item => (item.parentId || null) === currentFolderId);
     }
 
     function openFolder(folderId) {
@@ -776,7 +808,7 @@
       let tempStack = [];
 
       while (curr) {
-        const found = dbFiles.find(item => item.id === curr);
+        const found = dbData.find(item => item.id === curr);
         if (found) {
           tempStack.unshift({ id: found.id, name: found.name });
           curr = found.parentId;
@@ -850,7 +882,7 @@
       container.innerHTML = `<div class="text-center py-6 text-amber-400 text-xs font-semibold">⏳ Đang lấy danh sách bản sao lưu...</div>`;
 
       try {
-        const res = await fetch(`${BACKUP_SCRIPT_URL}?mtb=${encodeURIComponent(CURRENT_MTB)}&t=${Date.now()}`);
+        const res = await fetch(`${BACKUP_SCRIPT_URL}?mtb=${encodeURIComponent(currentConfig.mtb)}&t=${Date.now()}`);
         const listData = await res.json();
 
         if (!listData || listData.length === 0) {
@@ -871,7 +903,7 @@
                   <div class="text-xs font-bold text-slate-100">🕒 Bản lưu #${recent3Backups.length - index}: ${item.time}</div>
                 </div>
                 <span class="text-[10px] bg-purple-500/20 text-purple-300 px-2 py-0.5 rounded border border-purple-500/30">
-                  MTB: ${CURRENT_MTB}
+                  MTB: ${currentConfig.mtb}
                 </span>
               </div>
 
@@ -900,7 +932,7 @@
 
         if (Array.isArray(importedData)) {
           if (confirm(`Khôi phục ${importedData.length} mục từ bản sao lưu này?`)) {
-            dbFiles = importedData;
+            dbData = importedData;
             renderBreadcrumb();
             renderFiles(getCurrentFolderItems());
             updateStorageUsage();
@@ -928,7 +960,7 @@
 
     function updateStorageUsage() {
       const maxBytes = MAX_STORAGE_GB * 1024 * 1024 * 1024;
-      const totalBytes = dbFiles.reduce((sum, item) => sum + (item.size || 0), 0);
+      const totalBytes = dbData.reduce((sum, item) => sum + (item.size || 0), 0);
       const usedPercentage = Math.min(100, ((totalBytes / maxBytes) * 100).toFixed(1));
       
       const storageUsageText = document.getElementById('storageUsageText');
