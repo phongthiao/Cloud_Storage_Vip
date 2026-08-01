@@ -230,10 +230,10 @@
   </div>
 
   <script>
-    // URL Google Apps Script xử lý đăng nhập & bảo mật mới
+    // URL Google Apps Script xử lý đăng nhập & bảo mật
     const AUTH_API_URL = "https://script.google.com/macros/s/AKfycbxjalTqrI_MIgvRylfEwoK1D95Dg-TBmLfdFBXOQT0Ec_yrgAjY0eKbm_aXfUtWAq6v/exec";
     
-    // Script sao lưu dữ liệu
+    // Script sao lưu dữ liệu Google Sheet
     const BACKUP_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyMkD7y_bCC4l27JZgn5bzmWpch_ZTH208YzapDTw6nMIC4CXD9lUJJ2ccq3wqcsmhLeA/exec";
 
     // Kích thước cắt file mặc định (15 MB mỗi chunk)
@@ -360,47 +360,61 @@
       await autoExportBackupToCloud();
     }
 
-    // TỰ ĐỘNG SAO LƯU DỮ LIỆU ĐỒNG THỜI CẢ 2 BOT TELEGRAM
+    // TỰ ĐỘNG SAO LƯU DỮ LIỆU ĐỒNG THỜI CẢ 2 BOT TELEGRAM (BẢN NÂNG CAO ĐỘC LẬP)
     async function autoSaveMainDatabase() {
       try {
         if (!currentConfig || !dbData) return;
 
         const fileName = `database_${currentConfig.mtb || 'backup'}.json`;
         const jsonString = JSON.stringify(dbData, null, 2);
-        const blob = new Blob([jsonString], { type: 'application/json' });
 
-        // FormData Bot Chính
-        const formDataMain = new FormData();
-        formDataMain.append('chat_id', currentConfig.chatId);
-        formDataMain.append('document', blob, fileName);
-        formDataMain.append('caption', `📦 [TỰ ĐỘNG SAO LƯU - BOT CHÍNH]\n⏰ Thời gian: ${new Date().toLocaleString('vi-VN')}`);
+        // 1. GỬI CHO BOT CHÍNH
+        if (currentConfig.token && currentConfig.chatId) {
+          const blobMain = new Blob([jsonString], { type: 'application/json' });
+          const formDataMain = new FormData();
+          formDataMain.append('chat_id', currentConfig.chatId);
+          formDataMain.append('document', blobMain, fileName);
+          formDataMain.append('caption', `📦 [TỰ ĐỘNG SAO LƯU - BOT CHÍNH]\n⏰ Thời gian: ${new Date().toLocaleString('vi-VN')}`);
 
-        const requests = [
           fetch(`https://api.telegram.org/bot${currentConfig.token}/sendDocument`, {
             method: 'POST',
             body: formDataMain
           })
-        ];
-
-        // FormData Bot Dự Phòng (nếu được khai báo)
-        if (currentConfig.backupBotToken && currentConfig.backupChatId) {
-          const formDataBackup = new FormData();
-          formDataBackup.append('chat_id', currentConfig.backupChatId);
-          formDataBackup.append('document', blob, fileName);
-          formDataBackup.append('caption', `🛡️ [TỰ ĐỘNG SAO LƯU - BOT DỰ PHÒNG]\n⏰ Thời gian: ${new Date().toLocaleString('vi-VN')}`);
-
-          requests.push(
-            fetch(`https://api.telegram.org/bot${currentConfig.backupBotToken}/sendDocument`, {
-              method: 'POST',
-              body: formDataBackup
-            })
-          );
+          .then(res => res.json())
+          .then(data => {
+            if (data.ok) console.log('✅ Bot chính gửi backup thành công!');
+            else console.error('❌ Lỗi Bot chính gửi backup:', data.description);
+          })
+          .catch(err => console.error('❌ Lỗi mạng Bot chính:', err));
         }
 
-        await Promise.all(requests);
-        console.log('✅ Đã sao lưu dữ liệu về cả 2 kênh Bot!');
+        // 2. GỬI CHO BOT DỰ PHÒNG
+        const backupToken = currentConfig.backupBotToken;
+        const backupChatId = currentConfig.backupChatId;
+
+        if (backupToken && backupChatId) {
+          const blobBackup = new Blob([jsonString], { type: 'application/json' });
+          const formDataBackup = new FormData();
+          formDataBackup.append('chat_id', backupChatId);
+          formDataBackup.append('document', blobBackup, fileName);
+          formDataBackup.append('caption', `🛡️ [TỰ ĐỘNG SAO LƯU - BOT DỰ PHÒNG]\n⏰ Thời gian: ${new Date().toLocaleString('vi-VN')}`);
+
+          fetch(`https://api.telegram.org/bot${backupToken}/sendDocument`, {
+            method: 'POST',
+            body: formDataBackup
+          })
+          .then(res => res.json())
+          .then(data => {
+            if (data.ok) console.log('✅ Bot dự phòng gửi backup thành công!');
+            else console.error('❌ Lỗi Bot dự phòng gửi backup:', data.description);
+          })
+          .catch(err => console.error('❌ Lỗi mạng Bot dự phòng:', err));
+        } else {
+          console.warn('⚠️ Chưa nhận được Token/ChatID Bot dự phòng. Kiểm tra dữ liệu đăng nhập!');
+        }
+
       } catch (error) {
-        console.error('❌ Lỗi tự động sao lưu:', error);
+        console.error('❌ Lỗi hệ thống khi tự động sao lưu:', error);
       }
     }
 
